@@ -30,4 +30,5 @@ jobs:
         run: |
           oci resource-manager job create-apply-job \
             --stack-id ${{ secrets.OCI_STACK_ID }} \
+            --execution-plan-strategy AUTO_APPROVED \
             --wait-for-state SUCCEEDED
