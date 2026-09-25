@@ -44,7 +44,7 @@ jobs:
             fi
 
             JITTER=$(( (RANDOM % 10) + 1 ))
-            WAIT=$((360 + JITTER))
+            WAIT=$((600 + JITTER))
             echo "Result: not succeeded yet. Retrying in ${WAIT}s..."
             sleep $WAIT
           done
