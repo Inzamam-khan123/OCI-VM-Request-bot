@@ -1,9 +1,6 @@
 name: OCI Stack Retry
 
 on:
-  workflow_run:
-    workflows: ["OCI Stack Retry"]
-    types: [completed]
   workflow_dispatch:
 
 jobs:
@@ -51,4 +48,13 @@ jobs:
             echo "Result: not succeeded yet. Retrying in ${WAIT}s..."
             sleep $WAIT
           done
-          echo "Loop window ended without success. Cron safety net will restart a new run."
+          echo "Loop window ended without success. Retriggering a fresh run..."
+
+      - name: Retrigger self
+        if: always()
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/retry-stack.yml/dispatches \
+            -d '{"ref":"main"}'
