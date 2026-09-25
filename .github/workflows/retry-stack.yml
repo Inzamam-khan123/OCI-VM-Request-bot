@@ -1,13 +1,15 @@
 name: OCI Stack Retry
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
+  workflow_run:
+    workflows: ["OCI Stack Retry"]
+    types: [completed]
   workflow_dispatch:
 
 jobs:
   retry:
     runs-on: ubuntu-latest
+    timeout-minutes: 355   # stay under GitHub's 6h (360min) hard job cap
     steps:
       - name: Install OCI CLI
         run: pip install oci-cli
@@ -26,10 +28,27 @@ jobs:
           key_file=~/.oci/key.pem
           EOF
 
-      - name: Apply Stack
+      - name: Hunt loop
         run: |
-          oci resource-manager job create-apply-job \
-            --stack-id ${{ secrets.OCI_STACK_ID }} \
-            --execution-plan-strategy AUTO_APPROVED \
-            --wait-for-state SUCCEEDED --wait-for-state FAILED \
-            --max-wait-seconds 120
+          END=$((SECONDS+21000))   # ~350 minutes, leaves buffer before timeout-minutes cutoff
+          while [ $SECONDS -lt $END ]; do
+            echo "[$(date -u +%T)] Attempting stack apply..."
+            oci resource-manager job create-apply-job \
+              --stack-id ${{ secrets.OCI_STACK_ID }} \
+              --execution-plan-strategy AUTO_APPROVED \
+              --wait-for-state SUCCEEDED --wait-for-state FAILED \
+              --max-wait-seconds 120 > job_output.json 2>&1
+
+            if grep -q '"lifecycle-state": "SUCCEEDED"' job_output.json; then
+              echo "************************************************"
+              echo "SUCCESS! Instance is provisioning."
+              cat job_output.json
+              exit 0
+            fi
+
+            JITTER=$(( (RANDOM % 10) + 1 ))
+            WAIT=$((360 + JITTER))
+            echo "Result: not succeeded yet. Retrying in ${WAIT}s..."
+            sleep $WAIT
+          done
+          echo "Loop window ended without success. Cron safety net will restart a new run."
