@@ -1,12 +1,22 @@
 name: OCI Stack Retry
 
 on:
+  schedule:
+    - cron: "17 * * * *"   # watchdog: hourly, restarts the chain if it died
   workflow_dispatch:
+
+permissions:
+  actions: write           # needed to retrigger and to disable on success
+  contents: read
+
+concurrency:
+  group: oci-retry         # only one hunter at a time
+  cancel-in-progress: false
 
 jobs:
   retry:
     runs-on: ubuntu-latest
-    timeout-minutes: 355   # stay under GitHub's 6h (360min) hard job cap
+    timeout-minutes: 355   # stay under GitHub's 6h cap
     steps:
       - name: Install OCI CLI
         run: pip install oci-cli
@@ -26,32 +36,35 @@ jobs:
           EOF
 
       - name: Hunt loop
+        id: hunt
         run: |
-          END=$((SECONDS+21000))   # ~350 minutes, leaves buffer before timeout-minutes cutoff
+          END=$((SECONDS+21000))   # ~350 min loop window
           while [ $SECONDS -lt $END ]; do
             echo "[$(date -u +%T)] Attempting stack apply..."
             oci resource-manager job create-apply-job \
               --stack-id ${{ secrets.OCI_STACK_ID }} \
               --execution-plan-strategy AUTO_APPROVED \
               --wait-for-state SUCCEEDED --wait-for-state FAILED \
-              --max-wait-seconds 120 > job_output.json 2>&1 || true
+              --max-wait-seconds 120 > job_output.json 2>&1 || true   # keep loop alive on failure
 
             if grep -q '"lifecycle-state": "SUCCEEDED"' job_output.json; then
-              echo "************************************************"
               echo "SUCCESS! Instance is provisioning."
-              cat job_output.json
+              echo "success=true" >> $GITHUB_OUTPUT                    # tells later steps to stop the chain
+              curl -X PUT \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/repos/${{ github.repository }}/actions/workflows/retry-stack.yml/disable
               exit 0
             fi
 
-            JITTER=$(( (RANDOM % 10) + 1 ))
-            WAIT=$((600 + JITTER))
-            echo "Result: not succeeded yet. Retrying in ${WAIT}s..."
+            JITTER=$(( (RANDOM % 10) + 1 ))                           # random 1-10s
+            WAIT=$((600 + JITTER))                                    # 10 min + jitter
+            echo "Not succeeded yet. Retrying in ${WAIT}s..."
             sleep $WAIT
           done
-          echo "Loop window ended without success. Retriggering a fresh run..."
 
       - name: Retrigger self
-        if: always()
+        if: always() && steps.hunt.outputs.success != 'true'
         run: |
           curl -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
