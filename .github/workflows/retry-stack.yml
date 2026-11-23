@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write           # needed to retrigger and to disable on success
+  actions: write           # needed to retrigger itself
   contents: read
 
 concurrency:
@@ -37,30 +37,57 @@ jobs:
 
       - name: Hunt loop
         id: hunt
+        env:
+          A1_ID: ${{ secrets.OCI_STACK_ID }}              # VM1 (ARM) stack
+          MICRO_ID: ${{ secrets.OCI_STACK_ID_MICRO }}     # micro stack
         run: |
-          END=$((SECONDS+21000))   # ~350 min loop window
-          while [ $SECONDS -lt $END ]; do
-            echo "[$(date -u +%T)] Attempting stack apply..."
+          try_apply() {                                   # returns 0 only if the apply SUCCEEDED
             oci resource-manager job create-apply-job \
-              --stack-id ${{ secrets.OCI_STACK_ID }} \
+              --stack-id "$1" \
               --execution-plan-strategy AUTO_APPROVED \
               --wait-for-state SUCCEEDED --wait-for-state FAILED \
               --max-wait-seconds 120 > job_output.json 2>&1 || true   # keep loop alive on failure
+            grep -q '"lifecycle-state": "SUCCEEDED"' job_output.json
+          }
 
-            if grep -q '"lifecycle-state": "SUCCEEDED"' job_output.json; then
-              echo "SUCCESS! Instance is provisioning."
-              echo "success=true" >> $GITHUB_OUTPUT                    # tells later steps to stop the chain
-              curl -X PUT \
-                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Accept: application/vnd.github+json" \
-                https://api.github.com/repos/${{ github.repository }}/actions/workflows/retry-stack.yml/disable
+          END=$((SECONDS+21000))                          # ~350 min loop window
+          TURN=0                                          # 0 = VM1, 1 = micro
+          A1_DONE=0
+          MICRO_DONE=0
+
+          while [ $SECONDS -lt $END ]; do
+            ATTEMPTED=0
+
+            if [ $TURN -eq 0 ] && [ $A1_DONE -eq 0 ]; then
+              echo "[$(date -u +%T)] Attempting VM1 (ARM) stack..."
+              ATTEMPTED=1
+              if try_apply "$A1_ID"; then
+                echo "SUCCESS: VM1 is provisioning."
+                A1_DONE=1
+              fi
+            elif [ $TURN -eq 1 ] && [ $MICRO_DONE -eq 0 ]; then
+              echo "[$(date -u +%T)] Attempting micro stack..."
+              ATTEMPTED=1
+              if try_apply "$MICRO_ID"; then
+                echo "SUCCESS: micro is provisioning."
+                MICRO_DONE=1
+              fi
+            fi
+
+            TURN=$(( 1 - TURN ))                          # switch to the other stack
+
+            if [ $A1_DONE -eq 1 ] && [ $MICRO_DONE -eq 1 ]; then
+              echo "Both stacks succeeded."
+              echo "success=true" >> $GITHUB_OUTPUT        # stops the chain from retriggering
               exit 0
             fi
 
-            JITTER=$(( (RANDOM % 10) + 1 ))                           # random 1-10s
-            WAIT=$((600 + JITTER))                                    # 10 min + jitter
-            echo "Not succeeded yet. Retrying in ${WAIT}s..."
-            sleep $WAIT
+            if [ $ATTEMPTED -eq 1 ]; then                 # only wait after a real attempt
+              JITTER=$(( (RANDOM % 10) + 1 ))             # random 1-10s
+              WAIT=$((600 + JITTER))                      # 10 min + jitter
+              echo "Retrying the other stack in ${WAIT}s..."
+              sleep $WAIT
+            fi
           done
 
       - name: Retrigger self
